@@ -6,12 +6,16 @@
 #include <signal.h>
 #include <unistd.h>
 #include <iostream>
+#include <sstream>
+#include <fstream>
 #include <string>
 #include <functional>
 #include <assert.h>
 
-#include "bcc_version.h"
-#include "BPF.h"
+#include <fmt/core.h>
+
+#include <bcc_version.h>
+#include <BPF.h>
 
 /*
 
@@ -21,9 +25,9 @@ Note : TLS connection patterns:
 ----------------------------------------
 | 0      | 22      | TLS id            |
 ----------------------------------------
-| 1      | 3/2/1   | Minor TLS version |
+| 1      | 3       | Major TLS version |
 ----------------------------------------
-| 2      | 1       | Major TLS version |
+| 2      | 1/2/3   | Minor TLS version |
 ----------------------------------------
 
 */
@@ -31,11 +35,19 @@ Note : TLS connection patterns:
 const std::string BPF_PROGRAM = R"(
 #include <linux/fs.h>
 #include <linux/socket.h>
+#include <net/sock.h>
 #include <asm/errno.h>
+#include <uapi/linux/ptrace.h>
 
 struct event_t {
-  char ip[4];
-  size_t size;
+  u32 saddr;
+  u32 daddr;
+  u16 dport;
+  u8  v6_saddr[16];
+  u8  v6_daddr[16];
+  u8  tls_version;
+  u8  is_recv;
+  u32 len;
 };
 BPF_PERF_OUTPUT(events);
 
@@ -56,21 +68,30 @@ static bool match_target_pid()
     return true;
 }
 
+static void process_sk(struct sock* sk, struct event_t* event)
+{
+   	bpf_probe_read(&event->saddr, sizeof(event->saddr), &sk->sk_rcv_saddr);
+	bpf_probe_read(&event->daddr, sizeof(event->daddr), &sk->sk_daddr);
+
+	bpf_probe_read(&event->v6_saddr, sizeof(event->v6_saddr), &sk->sk_v6_rcv_saddr);
+	bpf_probe_read(&event->v6_daddr, sizeof(event->v6_daddr), &sk->sk_v6_daddr);
+
+	bpf_probe_read(&event->dport, sizeof(event->dport), &sk->sk_dport);
+    event->dport = ntohs(event->dport);
+}
+
 int on_tcp_send(struct pt_regs *ctx,
                 struct sock *sk,
                 struct msghdr *msg,
                 size_t size)
 {
-    struct event_t event = {};
 
     if(!match_target_pid())
         return 0;
-    event.ip[0] = 'A';
-    event.ip[1] = 'B';
-    event.ip[2] = 'C';
-    event.ip[3] = 'D';
-    event.size = size;
 
+    struct event_t event = {};
+    event.is_recv = 0;
+    process_sk(sk, &event);
     events.perf_submit(ctx, &event, sizeof(event));
 
     return 0;
@@ -84,16 +105,27 @@ int on_tcp_recv(struct pt_regs *ctx,
 		        int flags,
                 int *addr_len)
 {
-    struct event_t event = {};
-
     if(!match_target_pid())
         return 0;
 
-    event.ip[0] = 'D';
-    event.ip[1] = 'C';
-    event.ip[2] = 'B';
-    event.ip[3] = 'A';
-    event.size = len;
+    //if(len < 3)
+    //    return 0;
+
+    // filter out SSL connection
+    u8 payload[3];
+    //copy_to_iter(&payload, 3, &msg->msg_iter);
+
+    if(payload[0] != 0x16 || payload[1] != 0x03)
+    {
+        // not ssl/tls connection
+        //return 0;
+    }
+
+	struct event_t event = {};
+    event.is_recv = 1;
+    event.len = len;
+    process_sk(sk, &event);
+    event.tls_version = payload[2];
 
     events.perf_submit(ctx, &event, sizeof(event));
 
@@ -101,6 +133,38 @@ int on_tcp_recv(struct pt_regs *ctx,
 }
 
 )";
+
+std::string ipv4_to_string(uint32_t ip)
+{
+    return fmt::format("{}.{}.{}.{}",
+                       ((ip)&0xFF),
+                       ((ip >> 8) & 0xFF),
+                       ((ip >> 16) & 0xFF),
+                       ((ip >> 24) & 0xFF));
+}
+
+std::string ipv4_to_string(uint8_t (*addr)[16])
+{
+    return fmt::format(
+        "{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}",
+        *(addr[0]),
+        *(addr[1]),
+        *(addr[2]),
+        *(addr[3]),
+        *(addr[4]),
+        *(addr[5]),
+        *(addr[6]),
+        *(addr[7]),
+        *(addr[8]),
+        *(addr[9]),
+        *(addr[10]),
+        *(addr[11]),
+        *(addr[12]),
+        *(addr[13]),
+        *(addr[14]),
+        *(addr[15])
+    );
+}
 
 std::function<void(int)> shutdown_handler;
 
@@ -111,14 +175,28 @@ void on_sigint_handler(int signum)
 
 struct event_t
 {
-    char ip[4];
-    size_t size;
+    uint32_t saddr;
+    uint32_t daddr;
+    uint16_t dport;
+    uint8_t v6_saddr[16];
+    uint8_t v6_daddr[16];
+    uint8_t tls_version;
+    uint8_t is_recv;
+    uint32_t len;
 };
 
 void on_event_handler(void *cb_cookie, void *data, int data_size)
 {
     auto event = static_cast<event_t *>(data);
-    std::cout << event->ip << " size=[" << event->size << "]\n";
+    std::cout << "daddr=[" << ipv4_to_string(event->daddr)
+              << "], saddr=[" << ipv4_to_string(event->saddr)
+              << "], dport=[" << event->dport
+              << "], v6_saddr=[" << ipv4_to_string(&event->v6_saddr)
+              << "], v6_saddr=[" << ipv4_to_string(&event->v6_saddr)
+              << "], tls_version=[" << static_cast<int>(event->tls_version)
+              << "], is_recv=[" << static_cast<int>(event->is_recv)
+              << "], len=[" << event->len
+              << "]\n";
 }
 
 int main(int argc, char *argv[])
@@ -138,7 +216,7 @@ int main(int argc, char *argv[])
     }
     catch (const std::exception &ex)
     {
-        std::cerr << "Error: expected <pid>, but [" << argv[1] << "] given.\n";
+        std::cerr << "Error: expected <pid>, but [" << argv[1] << "] provided.\n";
         return EXIT_FAILURE;
     }
 
