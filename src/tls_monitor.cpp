@@ -1,8 +1,172 @@
-/*
- * Copyright (c) Facebook, Inc.
- * Licensed under the Apache License, Version 2.0 (the "License")
- */
+#include <unistd.h>
+#include <fstream>
+#include <iostream>
+#include <exception>
+#include <assert.h>
 
+#include <fmt/core.h>
+
+#include <bcc_version.h>
+#include <BPF.h>
+
+// inline bpf code
+#include "bpf_app.h"
+
+/*
+
+Note : TLS connection patterns:
+----------------------------------------
+| byte # | Value   | Description       |
+----------------------------------------
+| 0      | 22      | TLS id            |
+----------------------------------------
+| 1      | 3/2/1/0 | Minor TLS version |
+----------------------------------------
+| 2      | 1       | Major TLS version |
+----------------------------------------
+
+*/
+
+
+struct attach_probe_t final
+{
+    attach_probe_t(ebpf::BPF &ebpf,
+                   std::string fnname,
+                   std::string probe_name,
+                   bpf_probe_attach_type type = BPF_PROBE_ENTRY)
+        : _ebpf(ebpf), _fnname(std::move(fnname)), _probe_name(std::move(probe_name))
+    {
+        std::cout << "Attaching probe=[" << _probe_name << "] to fnname=[" << _fnname << "]\n";
+        auto rc = ebpf.attach_kprobe(_fnname, _probe_name, 0, type, 0);
+        if (rc.code() != 0)
+        {
+            std::cerr << rc.msg() << std::endl;
+            throw std::runtime_error("failed to attach probe [" + _probe_name + "]");
+        }
+    }
+
+    ~attach_probe_t()
+    {
+        try
+        {
+            auto rc = _ebpf.detach_kprobe(_fnname);
+            if (rc.code() != 0)
+                std::cerr << "error :" << rc.msg() << std::endl;
+        }
+        catch(const std::exception& e)
+        {
+            std::cerr << e.what() << '\n';
+        }
+    }
+
+private:
+    ebpf::BPF &_ebpf;
+    std::string _fnname;
+    std::string _probe_name;
+};
+
+struct startup_t final
+{
+    startup_t(int argc, char** argv)
+    {
+        if (argc != 2)
+        {
+            std::cerr << argv[0] << "Usage: tls_monitor <pid>" << std::endl;
+            exit(EXIT_FAILURE);
+        }
+
+        // handle passed arguments
+        try
+        {
+            _pid = std::stoul(argv[1]);
+            assert(_pid != 0U);
+        }
+        catch (const std::exception &ex)
+        {
+            std::cerr << "Error: expected <pid>, but [" << argv[1] << "] provided.\n";
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    const unsigned long pid() const
+    {
+        return _pid;
+    }
+
+    private:
+        unsigned long _pid{0};
+};
+
+#define READ_PAYLOAD_SIZE 12
+struct read_event_t
+{
+    unsigned int fd;
+    char payload[READ_PAYLOAD_SIZE];
+    unsigned size;
+};
+
+void on_event_handler(void *cb_cookie, void *data, int data_size)
+{
+    return;
+
+    auto event = static_cast<read_event_t *>(data);
+    std::cout << "fd=[" << event->fd
+              << "], payload=[";
+    for (auto i = 0; i < READ_PAYLOAD_SIZE; ++i)
+        std::cout << fmt::format("{:02x},", event->payload[i]);
+    std::cout << "], size=[" << event->size << "]\n";
+}
+
+int main(int argc, char* argv[])
+{
+    startup_t startup(argc, argv);
+
+    ebpf::BPF bpf;
+    auto init_res = bpf.init(BPF_PROGRAM);
+    if (init_res.code() != 0)
+    {
+        std::cerr << init_res.msg() << std::endl;
+        exit(EXIT_FAILURE);
+    }
+
+    // set filterting pid
+    uint32_t key{0};
+    auto pid_table = bpf.get_array_table<uint32_t>("target_pid");
+    auto rc = pid_table.update_value(key, startup.pid());
+    if (rc.code() != 0)
+    {
+        std::cerr << rc.msg() << std::endl;
+        exit(EXIT_FAILURE);
+    }
+
+    // read
+    auto syscall_sys_read_name = bpf.get_syscall_fnname("read");
+    attach_probe_t read_probe(bpf, syscall_sys_read_name, "syscall__read");
+    attach_probe_t read_ret_probe(bpf, syscall_sys_read_name, "syscall__read_ret", BPF_PROBE_RETURN);
+
+    rc = bpf.open_perf_buffer("read_events", &on_event_handler);
+    if (rc.code() != 0)
+    {
+        std::cerr << rc.msg() << "\n";
+        return EXIT_FAILURE;
+    }
+
+
+    std::ifstream pipe("/sys/kernel/debug/tracing/trace_pipe");
+    while (true)
+    {
+        std::string line;
+        if (std::getline(pipe, line))
+        {
+            std::cout << "bpf log : [" << line << "]\n";
+        }
+        //bpf.poll_perf_buffer("read_events");
+    }
+
+    return 0;
+}
+
+#if 0
 #include <signal.h>
 #include <unistd.h>
 #include <iostream>
@@ -17,26 +181,15 @@
 #include <bcc_version.h>
 #include <BPF.h>
 
-/*
 
-Note : TLS connection patterns:
-----------------------------------------
-| byte # | Value   | Description       |
-----------------------------------------
-| 0      | 22      | TLS id            |
-----------------------------------------
-| 1      | 3       | Major TLS version |
-----------------------------------------
-| 2      | 1/2/3   | Minor TLS version |
-----------------------------------------
-
-*/
 
 const std::string BPF_PROGRAM = R"(
 #include <linux/fs.h>
 #include <linux/socket.h>
+#include <net/inet_sock.h>
 #include <net/sock.h>
 #include <asm/errno.h>
+
 #include <uapi/linux/ptrace.h>
 
 struct event_t {
@@ -48,10 +201,18 @@ struct event_t {
   u8  tls_version;
   u8  is_recv;
   u32 len;
+  u8 u0;
+  u8 u1;
+  u8 u2;
 };
 BPF_PERF_OUTPUT(events);
 
+// store msghdr pointer captured on syscall entry to parse on syscall return
+BPF_HASH(tbl_tcp_msghdr, u64, struct msghdr *);
+BPF_HASH(tbl_tcp_sock, u64, struct sock *);
+
 BPF_ARRAY(target_pid, u32, 1);
+
 static bool match_target_pid()
 {
     int key = 0, *val, tpid, cpid;
@@ -97,38 +258,82 @@ int on_tcp_send(struct pt_regs *ctx,
     return 0;
 }
 
-int on_tcp_recv(struct pt_regs *ctx,
-                struct sock *sk,
-                struct msghdr *msg,
-                size_t len,
-                int nonblock,
-		        int flags,
-                int *addr_len)
+int kprobe__tcp_recvmsg(struct pt_regs *ctx)
 {
     if(!match_target_pid())
-        return 0;
+        goto CLEANUP;
 
-    //if(len < 3)
-    //    return 0;
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+
+    struct msghdr *msghdr = (struct msghdr *)PT_REGS_PARM2(ctx);
+    if (msghdr == 0)
+        goto CLEANUP;
+    tbl_tcp_msghdr.update(&pid_tgid, &msghdr);
+
+    struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
+    if (sk == 0)
+        goto CLEANUP;
+    tbl_tcp_sock.update(&pid_tgid, &sk);
+
+CLEANUP:
+    return 0;
+}
+
+int kretprobe__tcp_recvmsg(struct pt_regs *ctx)
+{
+    if(!match_target_pid())
+        goto EXIT;
+
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    struct msghdr **msgpp = tbl_tcp_msghdr.lookup(&pid_tgid);
+    if (msgpp == 0)
+        goto CLEANUP;
+
+    struct msghdr *msghdr = (struct msghdr *)*msgpp;
+    if (msghdr->msg_iter.type != ITER_IOVEC)
+        goto CLEANUP;
+
+    int copied = (int)PT_REGS_RC(ctx);
+    if (copied < 0)
+        goto CLEANUP;
+
+    size_t buflen = (size_t)copied;
+    if (buflen > msghdr->msg_iter.iov->iov_len)
+        goto CLEANUP;
 
     // filter out SSL connection
     u8 payload[3];
-    //copy_to_iter(&payload, 3, &msg->msg_iter);
+    void *iovbase = msghdr->msg_iter.iov->iov_base;
+    bpf_probe_read(&payload, 3, iovbase);
 
     if(payload[0] != 0x16 || payload[1] != 0x03)
     {
         // not ssl/tls connection
-        //return 0;
+        //goto CLEANUP;
     }
 
-	struct event_t event = {};
-    event.is_recv = 1;
-    event.len = len;
+    struct sock **skp = tbl_tcp_sock.lookup(&pid_tgid);
+    if(skp == 0)
+        goto CLEANUP;
+
+    struct sock *sk = (struct sock *)*skp;
+
+    struct event_t event = {};
     process_sk(sk, &event);
+    event.is_recv = 1;
+    event.u0 = payload[0];
+    event.u1 = payload[1];
+    event.u2 = payload[2];
+    event.len = copied;
     event.tls_version = payload[2];
 
     events.perf_submit(ctx, &event, sizeof(event));
 
+CLEANUP:
+    tbl_tcp_msghdr.delete(&pid_tgid);
+    tbl_tcp_sock.delete(&pid_tgid);
+
+EXIT:
     return 0;
 }
 
@@ -183,6 +388,9 @@ struct event_t
     uint8_t tls_version;
     uint8_t is_recv;
     uint32_t len;
+    uint8_t u0;
+    uint8_t u1;
+    uint8_t u2;
 };
 
 void on_event_handler(void *cb_cookie, void *data, int data_size)
@@ -196,6 +404,7 @@ void on_event_handler(void *cb_cookie, void *data, int data_size)
               << "], tls_version=[" << static_cast<int>(event->tls_version)
               << "], is_recv=[" << static_cast<int>(event->is_recv)
               << "], len=[" << event->len
+              << "], payload=[" << fmt::format("{:02x} {:02x} {:02x}", event->u0, event->u1, event->u2)
               << "]\n";
 }
 
@@ -250,8 +459,14 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    // attach tcp_sendmsg
-    rc = bpf.attach_kprobe("tcp_recvmsg", "on_tcp_recv");
+    // attach tcp_recvmsg
+    rc = bpf.attach_kprobe("tcp_recvmsg", "kprobe__tcp_recvmsg");
+    if (rc.code() != 0)
+    {
+        std::cerr << rc.msg() << "\n";
+        return EXIT_FAILURE;
+    }
+    rc = bpf.attach_kprobe("tcp_recvmsg", "kretprobe__tcp_recvmsg", 0 , BPF_PROBE_RETURN, 0);
     if (rc.code() != 0)
     {
         std::cerr << rc.msg() << "\n";
@@ -292,3 +507,4 @@ int main(int argc, char *argv[])
 
     return EXIT_SUCCESS;
 }
+#endif
