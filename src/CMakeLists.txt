@@ -1,4 +1,4 @@
-add_executable(${TLS_MONITOR_BINARY_NAME} tls_monitor.cpp)
+add_executable(${TLS_MONITOR_BINARY_NAME} tls_monitor.cpp utils/ip_convert.cpp)
 
 #fmt
 target_include_directories(${TLS_MONITOR_BINARY_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/3rdparty/fmt-git-src/include)

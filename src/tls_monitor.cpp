@@ -4,13 +4,15 @@
 #include <exception>
 #include <assert.h>
 
+#include <sys/socket.h>
+
 #include <fmt/core.h>
 
 #include <bcc_version.h>
 #include <BPF.h>
 
 // inline bpf code
-#include "bpf_app.h"
+#include "bpf/tls_monitor.h"
 
 /*
 
@@ -26,7 +28,6 @@ Note : TLS connection patterns:
 ----------------------------------------
 
 */
-
 
 struct attach_probe_t final
 {
@@ -53,7 +54,7 @@ struct attach_probe_t final
             if (rc.code() != 0)
                 std::cerr << "error :" << rc.msg() << std::endl;
         }
-        catch(const std::exception& e)
+        catch (const std::exception &e)
         {
             std::cerr << e.what() << '\n';
         }
@@ -67,7 +68,7 @@ private:
 
 struct startup_t final
 {
-    startup_t(int argc, char** argv)
+    startup_t(int argc, char **argv)
     {
         if (argc != 2)
         {
@@ -93,31 +94,22 @@ struct startup_t final
         return _pid;
     }
 
-    private:
-        unsigned long _pid{0};
+private:
+    unsigned long _pid{0};
 };
 
-#define READ_PAYLOAD_SIZE 12
-struct read_event_t
+struct accept_event_t
 {
-    unsigned int fd;
-    char payload[READ_PAYLOAD_SIZE];
-    unsigned size;
+    unsigned int addr[4];
 };
 
-void on_event_handler(void *cb_cookie, void *data, int data_size)
+void on_tls_event_handler(void *cb_cookie, void *data, int data_size)
 {
-    return;
-
-    auto event = static_cast<read_event_t *>(data);
-    std::cout << "fd=[" << event->fd
-              << "], payload=[";
-    for (auto i = 0; i < READ_PAYLOAD_SIZE; ++i)
-        std::cout << fmt::format("{:02x},", event->payload[i]);
-    std::cout << "], size=[" << event->size << "]\n";
+    auto event = static_cast<accept_event_t *>(data);
+    std::cout << fmt::format("address=[{}.{}.{}.{}]\n", event->addr[0], event->addr[1], event->addr[2], event->addr[3]);
 }
 
-int main(int argc, char* argv[])
+int main(int argc, char *argv[])
 {
     startup_t startup(argc, argv);
 
@@ -138,29 +130,49 @@ int main(int argc, char* argv[])
         std::cerr << rc.msg() << std::endl;
         exit(EXIT_FAILURE);
     }
+    else
+    {
+        std::cout << "started for pid [" << startup.pid() << "]\n";
+    }
 
     // read
-    auto syscall_sys_read_name = bpf.get_syscall_fnname("read");
-    attach_probe_t read_probe(bpf, syscall_sys_read_name, "syscall__read");
-    attach_probe_t read_ret_probe(bpf, syscall_sys_read_name, "syscall__read_ret", BPF_PROBE_RETURN);
+    auto syscall_read_name = bpf.get_syscall_fnname("read");
+    attach_probe_t read_enter(bpf, syscall_read_name, "syscall__read_enter");
+    attach_probe_t read_exit(bpf, syscall_read_name, "syscall__read_exit", BPF_PROBE_RETURN);
 
-    rc = bpf.open_perf_buffer("read_events", &on_event_handler);
+    //socket
+    auto syscall_socket_name = bpf.get_syscall_fnname("socket");
+    attach_probe_t socket_enter(bpf, syscall_socket_name, "syscall__socket_enter");
+    attach_probe_t socket_exit(bpf, syscall_socket_name, "syscall__socket_exit", BPF_PROBE_RETURN);
+
+    //close
+    auto syscall_close_name = bpf.get_syscall_fnname("close");
+    attach_probe_t close_enter(bpf, syscall_close_name, "syscall__close_enter");
+
+    //accept
+    auto syscall_accept_name = bpf.get_syscall_fnname("accept");
+    attach_probe_t accept_enter(bpf, syscall_accept_name, "syscall__accept_enter");
+    attach_probe_t accept_exit(bpf, syscall_accept_name, "syscall__accept_exit", BPF_PROBE_RETURN);
+
+    rc = bpf.open_perf_buffer("tls_events", &on_tls_event_handler);
     if (rc.code() != 0)
     {
         std::cerr << rc.msg() << "\n";
         return EXIT_FAILURE;
     }
 
-
     std::ifstream pipe("/sys/kernel/debug/tracing/trace_pipe");
     while (true)
     {
+#if 1
         std::string line;
         if (std::getline(pipe, line))
         {
             std::cout << "bpf log : [" << line << "]\n";
         }
-        //bpf.poll_perf_buffer("read_events");
+#else
+        bpf.poll_perf_buffer("tls_events");
+#endif
     }
 
     return 0;
