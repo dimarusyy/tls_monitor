@@ -4,7 +4,6 @@ const std::string BPF_PROGRAM = R"(
 #include <linux/ptrace.h>
 #include <linux/socket.h>
 #include <net/sock.h>
-#include <bcc/proto.h>
 #include <uapi/linux/ptrace.h>
 
 ///////////////////////////////////////////////////////////////////////////////////////////
@@ -206,8 +205,6 @@ int syscall__accept_exit(struct pt_regs *ctx)
     if (!addrp)
         return 0;
 
-    struct sockaddr *addr = (struct sockaddr *)*addrp;
-
     struct client_hello_t data = {};
     data.is_tls_header = 0;
     data.is_client_record_header = 0;
@@ -215,9 +212,9 @@ int syscall__accept_exit(struct pt_regs *ctx)
     data.is_client_handshake_header = 0;
     data.is_notified = 0;
 
-    bpf_probe_read(&data.addr, sizeof(data.addr), addr);
+    bpf_probe_read(&data.addr, sizeof(data.addr), *addrp);
 
-    bpf_trace_printk("syscall__accept_exit(): sa_family=[%d]\n", addr->sa_family);
+    struct sockaddr* addr = (struct sockaddr*)*addrp;
 
     // update tls_table with the new socket entry and it's address
     struct client_hello_t *existing_client_hello = tls_table.lookup(&sockfd);

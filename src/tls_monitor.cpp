@@ -4,6 +4,7 @@
 #include <exception>
 #include <assert.h>
 
+#include <signal.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -83,13 +84,15 @@ struct startup_t final
         {
             _pid = std::stoul(argv[1]);
             assert(_pid != 0U);
+
+            check_pid();
         }
         catch (const std::exception &ex)
         {
             std::cerr << "Error: expected <pid>, but [" << argv[1] << "] provided.\n";
             exit(EXIT_FAILURE);
         }
-    }
+   }
 
     const unsigned long pid() const
     {
@@ -97,6 +100,15 @@ struct startup_t final
     }
 
 private:
+    void check_pid()
+    {
+        if( 0 != kill((pid_t)_pid, 0))
+        {
+            std::cerr << "Error: process with pid [" << _pid << "] not found.\n";
+            exit(EXIT_FAILURE);
+        }
+    }
+
     unsigned long _pid{0};
 };
 
