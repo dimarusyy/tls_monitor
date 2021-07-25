@@ -13,7 +13,7 @@ BPF_ARRAY(target_pid, u32, 1);
 
 struct client_hello_t
 {
-    u32 addr[4];
+    struct sockaddr addr;
 
     // parse header
     int is_tls_header;
@@ -27,8 +27,16 @@ struct client_hello_t
     int is_notified;
 };
 
+//
+// Keeps <client_id of socket, client_hello_t> pairing
+// to accumulate read data from the socket
+// and process parsing when necessary.
+//
 BPF_HASH(tls_table, u32 /*socket*/, struct client_hello_t);
 
+//
+// Keeps <pid_tid, struct sockaddr *> pairing
+//
 BPF_HASH(accept_table, u64, struct sockaddr *);
 
 struct read_args_t
@@ -40,7 +48,7 @@ BPF_HASH(read_table, u64, struct read_args_t);
 
 struct tls_event_t
 {
-    u32 addr[4];
+    struct sockaddr addr;
 };
 
 BPF_PERF_OUTPUT(tls_events);
@@ -62,6 +70,66 @@ static bool match_target_pid()
         return false;
     return true;
 }
+
+///////////////////////////////////////////////////////////////////////////////////////////
+
+static int process_read(struct pt_regs *ctx, char *buf, int count, struct client_hello_t *data)
+{
+    if(data->is_notified)
+        return 0;
+
+    // is it TLS ?
+    //
+    // https://tls.ulfheim.net/
+    //
+    //
+    if (count == 5 &&
+        data->is_tls_header == 0)
+    {
+        // read first 5 bytes of hello message
+        // parse record header if not parsed before
+        data->is_tls_header = -1;
+        data->is_client_record_header = -1;
+
+        // maybe client hello ?
+        if(buf[0] == 0x16 && buf[1] == 0x03 && buf[2] == 0x01) //tls 1.x ?
+        {
+            data->is_tls_header = 1;
+            data->is_client_record_header = 1;
+        }
+    }
+    else if (count >= 5 &&
+             data->is_tls_header == 1 &&
+             data->is_tls_handshake == 0)
+    {
+        // read more bytes including Client/Server hello
+
+        data->is_tls_handshake = -1;
+        data->is_client_handshake_header = -1;
+
+        //parse client handshake header
+        if(buf[0] == 0x01)
+        {
+            data->is_tls_handshake = 1;
+            data->is_client_handshake_header = 1;
+        }
+    }
+
+    return data->is_tls_header == 1 && data->is_tls_handshake == 1;
+}
+
+static void submit_event(struct pt_regs *ctx, struct client_hello_t *data)
+{
+    struct tls_event_t event = {};
+    __builtin_memcpy(&event.addr, &data->addr, sizeof(event.addr));
+    tls_events.perf_submit(ctx, &event, sizeof(event));
+
+    // update flag to avoid duplicated events
+    data->is_notified = 1;
+    bpf_trace_printk("syscall__read_exit() detected tls handshake\n");
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////
 
 int syscall__read_enter(struct pt_regs *ctx,
                         unsigned int fd, char __user *buf, size_t count)
@@ -92,10 +160,7 @@ int syscall__read_exit(struct pt_regs *ctx)
     if(!args)
         return 0;
 
-    char *buf = args->buf;
-    unsigned int fd = args->fd;
-
-    struct client_hello_t *data = (struct client_hello_t *)tls_table.lookup(&fd);
+    struct client_hello_t *data = (struct client_hello_t *)tls_table.lookup(&args->fd);
     if(!data)
     {
         read_table.delete(&pid_tgid);
@@ -103,78 +168,16 @@ int syscall__read_exit(struct pt_regs *ctx)
     }
 
     // is it TLS ?
-    if (count == 5)
-    {
-        //
-        // https://tls.ulfheim.net/
-        //
-        // parse record header if not parsed before
-        if(data->is_tls_header == 0)
-        {
-            data->is_tls_header = -1;
-            data->is_client_record_header = -1;
+    if(1 == process_read(ctx, args->buf, count, data))
+        submit_event(ctx, data);
 
-            // maybe client hello ?
-            if(buf[0] == 0x16 && buf[1] == 0x03 && buf[2] == 0x01) //tls 1.x ?
-            {
-                data->is_tls_header = 1;
-                data->is_client_record_header = 1;
-            }
-        }
-    }
-    else if (count >= 5 && data->is_tls_header == 1)
-    {
-        data->is_tls_handshake = -1;
-        data->is_client_handshake_header = -1;
-
-        //parse client handshake header
-        if(buf[0] == 0x01)
-        {
-            data->is_tls_handshake = 1;
-            data->is_client_handshake_header = 1;
-        }
-    }
-
-    if(data->is_tls_header == 1 && data->is_tls_handshake == 1 && data->is_notified == 0)
-    {
-        //submit event
-        struct tls_event_t event = {};
-        __builtin_memcpy(&event.addr, &data->addr, sizeof(event.addr));
-        tls_events.perf_submit(ctx, &event, sizeof(event));
-
-        data->is_notified = 1;
-        bpf_trace_printk("syscall__read_exit() detected tls handshake\n");
-    }
-
-    bpf_trace_printk("syscall__read_exit(): fd=[%d], buf=[%d], count=[%d]\n", fd, buf, count);
+    bpf_trace_printk("syscall__read_exit(): fd=[%d], buf=[%d], count=[%d]\n", args->fd, args->buf, count);
 
     read_table.delete(&pid_tgid);
     return 0;
 }
 
-int syscall__socket_enter(struct pt_regs *ctx,
-                          int domain, int type, int protocol)
-{
-    if (!match_target_pid())
-        return 0;
-
-    bpf_trace_printk("syscall__socket_enter(): domain=[%d], type=[%d], protocol=[%d]\n", domain, type, protocol);
-
-    return 0;
-}
-
-int syscall__socket_exit(struct pt_regs *ctx)
-{
-    if (!match_target_pid())
-        return 0;
-
-    int sockfd = (int)PT_REGS_RC(ctx);
-    ;
-
-    bpf_trace_printk("syscall__socket_exit(): sockfd=[%d]\n", sockfd);
-
-    return 0;
-}
+///////////////////////////////////////////////////////////////////////////////////////////
 
 int syscall__accept_enter(struct pt_regs *ctx,
                           int sockfd, struct sockaddr *addr, unsigned int *addrlen)
@@ -183,10 +186,6 @@ int syscall__accept_enter(struct pt_regs *ctx,
         return 0;
 
     bpf_trace_printk("syscall__accept_enter(): sockfd=[%d]\n", sockfd);
-    bpf_trace_printk("syscall__accept_enter(): addr->sa_data[0]=[%d]\n", addr->sa_data[0]);
-    bpf_trace_printk("syscall__accept_enter(): addr->sa_data[1]=[%d]\n", addr->sa_data[1]);
-    bpf_trace_printk("syscall__accept_enter(): addr->sa_data[2]=[%d]\n", addr->sa_data[2]);
-    bpf_trace_printk("syscall__accept_enter(): addr->sa_data[3]=[%d]\n", addr->sa_data[3]);
 
     u64 pid_tgid = bpf_get_current_pid_tgid();
     accept_table.update(&pid_tgid, &addr);
@@ -216,20 +215,9 @@ int syscall__accept_exit(struct pt_regs *ctx)
     data.is_client_handshake_header = 0;
     data.is_notified = 0;
 
+    bpf_probe_read(&data.addr, sizeof(data.addr), addr);
+
     bpf_trace_printk("syscall__accept_exit(): sa_family=[%d]\n", addr->sa_family);
-
-    if (addr->sa_family == AF_INET)
-    {
-        struct sockaddr_in *sa = (struct sockaddr_in *)addr;
-        data.addr[0] = sa->sin_addr.s_addr;
-
-        bpf_trace_printk("syscall__accept_exit(): addr=[%d]\n", sa->sin_addr.s_addr);
-    }
-    else
-    {
-        struct sockaddr_in6 *sa = (struct sockaddr_in6 *)addr;
-        bpf_probe_read_kernel(data.addr, sizeof(data.addr), &sa->sin6_addr);
-    }
 
     // update tls_table with the new socket entry and it's address
     struct client_hello_t *existing_client_hello = tls_table.lookup(&sockfd);
@@ -248,6 +236,8 @@ int syscall__accept_exit(struct pt_regs *ctx)
     return 0;
 }
 
+///////////////////////////////////////////////////////////////////////////////////////////
+
 int syscall__close_enter(struct pt_regs *ctx,
                          int sockfd)
 {
@@ -260,6 +250,32 @@ int syscall__close_enter(struct pt_regs *ctx,
     bpf_trace_printk("syscall__close_enter(): sockfd=[%d]\n", sockfd);
 
 EXIT:
+    return 0;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////
+
+int syscall__socket_enter(struct pt_regs *ctx,
+                          int domain, int type, int protocol)
+{
+    if (!match_target_pid())
+        return 0;
+
+    bpf_trace_printk("syscall__socket_enter(): domain=[%d], type=[%d], protocol=[%d]\n", domain, type, protocol);
+
+    return 0;
+}
+
+int syscall__socket_exit(struct pt_regs *ctx)
+{
+    if (!match_target_pid())
+        return 0;
+
+    int sockfd = (int)PT_REGS_RC(ctx);
+    ;
+
+    bpf_trace_printk("syscall__socket_exit(): sockfd=[%d]\n", sockfd);
+
     return 0;
 }
 

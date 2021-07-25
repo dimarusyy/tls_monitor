@@ -5,6 +5,8 @@
 #include <assert.h>
 
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 #include <fmt/core.h>
 
@@ -100,13 +102,14 @@ private:
 
 struct accept_event_t
 {
-    unsigned int addr[4];
+    struct sockaddr addr;
 };
 
 void on_tls_event_handler(void *cb_cookie, void *data, int data_size)
 {
     auto event = static_cast<accept_event_t *>(data);
-    std::cout << fmt::format("address=[{}.{}.{}.{}]\n", event->addr[0], event->addr[1], event->addr[2], event->addr[3]);
+    struct sockaddr_in *peer = (struct sockaddr_in *)&event->addr;
+    std::cout << fmt::format("address=[{}], port=[{}]\n", inet_ntoa(peer->sin_addr), ntohs(peer->sin_port));
 }
 
 int main(int argc, char *argv[])
@@ -164,7 +167,7 @@ int main(int argc, char *argv[])
     std::ifstream pipe("/sys/kernel/debug/tracing/trace_pipe");
     while (true)
     {
-#if 1
+#if 0
         std::string line;
         if (std::getline(pipe, line))
         {
