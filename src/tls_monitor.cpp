@@ -155,11 +155,6 @@ int main(int argc, char *argv[])
     attach_probe_t read_enter(bpf, syscall_read_name, "syscall__read_enter");
     attach_probe_t read_exit(bpf, syscall_read_name, "syscall__read_exit", BPF_PROBE_RETURN);
 
-    //socket
-    auto syscall_socket_name = bpf.get_syscall_fnname("socket");
-    attach_probe_t socket_enter(bpf, syscall_socket_name, "syscall__socket_enter");
-    attach_probe_t socket_exit(bpf, syscall_socket_name, "syscall__socket_exit", BPF_PROBE_RETURN);
-
     //close
     auto syscall_close_name = bpf.get_syscall_fnname("close");
     attach_probe_t close_enter(bpf, syscall_close_name, "syscall__close_enter");
@@ -168,6 +163,11 @@ int main(int argc, char *argv[])
     auto syscall_accept_name = bpf.get_syscall_fnname("accept");
     attach_probe_t accept_enter(bpf, syscall_accept_name, "syscall__accept_enter");
     attach_probe_t accept_exit(bpf, syscall_accept_name, "syscall__accept_exit", BPF_PROBE_RETURN);
+
+    //connect
+    auto syscall_connect_name = bpf.get_syscall_fnname("connect");
+    attach_probe_t connect_enter(bpf, syscall_connect_name, "syscall__connect_enter");
+    attach_probe_t connect_exit(bpf, syscall_connect_name, "syscall__connect_exit", BPF_PROBE_RETURN);
 
     rc = bpf.open_perf_buffer("tls_events", &on_tls_event_handler);
     if (rc.code() != 0)
