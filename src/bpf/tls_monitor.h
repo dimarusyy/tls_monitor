@@ -27,20 +27,18 @@ struct tls_hello_t
 // Keeps <client_id of socket, tls_hello_t> pairing
 // to accumulate read data from the socket
 // and process parsing when necessary.
-//
 BPF_HASH(socket_table, u32 /*socket*/, struct tls_hello_t);
 
 //
 // Keeps <pid_tid, struct sockaddr *> pairing
-//
 BPF_HASH(accept_table, u64, struct sockaddr *);
 
-struct connect_entry_t
+struct connect_args_t
 {
     int sockfd;
     struct sockaddr addr;
 };
-BPF_HASH(connect_table, u64, struct connect_entry_t);
+BPF_HASH(connect_table, u64, struct connect_args_t);
 
 struct read_args_t
 {
@@ -53,7 +51,6 @@ struct tls_event_t
 {
     struct sockaddr addr;
 };
-
 BPF_PERF_OUTPUT(tls_events);
 
 ///////////////////////////////////////////////////////////////////////////////////////////
@@ -217,12 +214,14 @@ int syscall__read_exit(struct pt_regs *ctx)
     if(!args)
         return 0;
 
+#if 0
     char* buf = args->buf;
     bpf_trace_printk("syscall__read_exit(): buf[0]=[%x]\n", buf[0]);
     bpf_trace_printk("syscall__read_exit(): buf[1]=[%x]\n", buf[1]);
     bpf_trace_printk("syscall__read_exit(): buf[2]=[%x]\n", buf[2]);
     bpf_trace_printk("syscall__read_exit(): buf[3]=[%x]\n", buf[3]);
     bpf_trace_printk("syscall__read_exit(): buf[4]=[%x]\n", buf[4]);
+#endif
 
     struct tls_hello_t *data = (struct tls_hello_t *)socket_table.lookup(&args->fd);
     if(!data)
@@ -333,7 +332,7 @@ int syscall__connect_enter(struct pt_regs *ctx,
     u64 pid_tgid = bpf_get_current_pid_tgid();
 
     // cache sockfd and addr
-    struct connect_entry_t ce = {};
+    struct connect_args_t ce = {};
     ce.sockfd = sockfd;
     bpf_probe_read(&ce.addr, sizeof(ce.addr), addr);
     connect_table.update(&pid_tgid, &ce);
@@ -355,7 +354,7 @@ int syscall__connect_exit(struct pt_regs *ctx)
         return 0;
 
     u64 pid_tgid = bpf_get_current_pid_tgid();
-    struct connect_entry_t *cep = connect_table.lookup(&pid_tgid);
+    struct connect_args_t *cep = connect_table.lookup(&pid_tgid);
     if (!cep)
         return 0;
 
