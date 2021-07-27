@@ -5,7 +5,7 @@ set(CMAKE_VERBOSE_MAKEFILE ON CACHE BOOL "ON")
 
 include(cmake/dependencies.cmake)
 
-set(TLS_MONITOR_BINARY_NAME "tls_monitor")
+set(TLS_MONITOR_BINARY_NAME "tlsmon")
 set(TLS_MONITOR_BINARY_VERSION "1.0.0")
 
 project(tls-monitor

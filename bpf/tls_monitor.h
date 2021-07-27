@@ -1,5 +1,23 @@
 #include <string>
 
+/*
+
+https://tls.ulfheim.net/
+
+
+TLS connection patterns:
+----------------------------------------
+| byte # | Value   | Description       |
+----------------------------------------
+| 0      | 22      | TLS id            |
+----------------------------------------
+| 1      | 3/2/1/0 | Minor TLS version |
+----------------------------------------
+| 2      | 1       | Major TLS version |
+----------------------------------------
+
+*/
+
 const std::string BPF_PROGRAM = R"(
 #include <linux/ptrace.h>
 #include <linux/socket.h>
@@ -7,6 +25,17 @@ const std::string BPF_PROGRAM = R"(
 #include <uapi/linux/ptrace.h>
 
 ///////////////////////////////////////////////////////////////////////////////////////////
+
+#define DEBUG 0
+
+#if DEBUG
+#define LOG(...) bpf_trace_printk(__VA_ARGS__);
+#else
+#define LOG(...) ;
+#endif
+
+///////////////////////////////////////////////////////////////////////////////////////////
+
 
 BPF_ARRAY(target_pid, u32, 1);
 
@@ -42,7 +71,7 @@ BPF_HASH(connect_table, u64, struct connect_args_t);
 
 struct read_args_t
 {
-    char* buf;
+    char *buf;
     unsigned int fd;
 };
 BPF_HASH(read_table, u64, struct read_args_t);
@@ -75,10 +104,8 @@ static bool match_target_pid()
 
 static int process_read(struct pt_regs *ctx, char *buf, int count, struct tls_hello_t *data)
 {
+    //
     // is it TLS ?
-    //
-    // https://tls.ulfheim.net/
-    //
     //
     if (count == 5 &&
         data->is_tls_header == 0)
@@ -88,23 +115,23 @@ static int process_read(struct pt_regs *ctx, char *buf, int count, struct tls_he
         data->is_tls_header = -1;
 
         // maybe client hello ?
-        if(buf[0] == 0x16) //tls 1.x ?
+        if (buf[0] == 0x16) //tls 1.x ?
         {
-            if(buf[1] == 0x03 && buf[2] == 0x01)
+            if (buf[1] == 0x03 && buf[2] == 0x01)
             {
                 data->is_tls_header = 1;
             }
-            if(buf[1] == 0x03 && buf[2] == 0x02)
+            if (buf[1] == 0x03 && buf[2] == 0x02)
             {
                 data->is_tls_header = 1;
             }
-            if(buf[1] == 0x03 && buf[2] == 0x03)
+            if (buf[1] == 0x03 && buf[2] == 0x03)
             {
                 data->is_tls_header = 1;
             }
         }
 
-        bpf_trace_printk("process_read() #1 : is_tls_header=[%d], is_tls_handshake=[%d]\n", data->is_tls_header, data->is_tls_handshake);
+        LOG("process_read() #1 : is_tls_header=[%d], is_tls_handshake=[%d]\n", data->is_tls_header, data->is_tls_handshake);
     }
     else if (count >= 6 &&
              data->is_tls_header == 1 &&
@@ -117,19 +144,19 @@ static int process_read(struct pt_regs *ctx, char *buf, int count, struct tls_he
         data->is_server_handshake_header = -1;
 
         //parse client handshake header
-        if(buf[0] == 0x01)
+        if (buf[0] == 0x01)
         {
-            if(buf[4] == 0x03 && buf[5] == 0x01)
+            if (buf[4] == 0x03 && buf[5] == 0x01)
             {
                 data->is_tls_handshake = 1;
                 data->is_client_handshake_header = 1;
             }
-            if(buf[4] == 0x03 && buf[5] == 0x02)
+            if (buf[4] == 0x03 && buf[5] == 0x02)
             {
                 data->is_tls_handshake = 1;
                 data->is_client_handshake_header = 1;
             }
-            if(buf[4] == 0x03 && buf[5] == 0x03)
+            if (buf[4] == 0x03 && buf[5] == 0x03)
             {
                 data->is_tls_handshake = 1;
                 data->is_client_handshake_header = 1;
@@ -137,30 +164,30 @@ static int process_read(struct pt_regs *ctx, char *buf, int count, struct tls_he
         }
 
         //parse serve handshake header
-        if(buf[0] == 0x02)
+        if (buf[0] == 0x02)
         {
             data->is_tls_handshake = 1;
-            if(buf[4] == 0x03 && buf[5] == 0x01)
+            if (buf[4] == 0x03 && buf[5] == 0x01)
             {
                 data->is_tls_handshake = 1;
                 data->is_server_handshake_header = 1;
             }
-            if(buf[4] == 0x03 && buf[5] == 0x02)
+            if (buf[4] == 0x03 && buf[5] == 0x02)
             {
                 data->is_tls_handshake = 1;
                 data->is_server_handshake_header = 1;
             }
-            if(buf[4] == 0x03 && buf[5] == 0x03)
+            if (buf[4] == 0x03 && buf[5] == 0x03)
             {
                 data->is_tls_handshake = 1;
                 data->is_server_handshake_header = 1;
             }
         }
 
-        bpf_trace_printk("process_read() #2 : is_tls_header=[%d], is_tls_handshake=[%d]\n", data->is_tls_header, data->is_tls_handshake);
+        LOG("process_read() #2 : is_tls_header=[%d], is_tls_handshake=[%d]\n", data->is_tls_header, data->is_tls_handshake);
     }
 
-    bpf_trace_printk("process_read() : is_tls_header=[%d], is_tls_handshake=[%d]\n", data->is_tls_header, data->is_tls_handshake);
+    LOG("process_read() : is_tls_header=[%d], is_tls_handshake=[%d]\n", data->is_tls_header, data->is_tls_handshake);
 
     return data->is_tls_header == 1 && data->is_tls_handshake == 1;
 }
@@ -182,9 +209,9 @@ int syscall__read_enter(struct pt_regs *ctx,
 
     // is tls session established already
     struct tls_hello_t *data = (struct tls_hello_t *)socket_table.lookup(&fd);
-    if(data &&
-       data->is_tls_header == 1 &&
-       data->is_tls_handshake == 1)
+    if (data &&
+        data->is_tls_header == 1 &&
+        data->is_tls_handshake == 1)
     {
         // tls conneciton is already established via socket 'fd'
         return 0;
@@ -207,31 +234,22 @@ int syscall__read_exit(struct pt_regs *ctx)
         return 0;
 
     int count = (int)PT_REGS_RC(ctx);
-    bpf_trace_printk("syscall__read_exit(): count=[%d]\n", count);
+    LOG("syscall__read_exit(): count=[%d]\n", count);
 
     u64 pid_tgid = bpf_get_current_pid_tgid();
     struct read_args_t *args = read_table.lookup(&pid_tgid);
-    if(!args)
+    if (!args)
         return 0;
 
-#if 0
-    char* buf = args->buf;
-    bpf_trace_printk("syscall__read_exit(): buf[0]=[%x]\n", buf[0]);
-    bpf_trace_printk("syscall__read_exit(): buf[1]=[%x]\n", buf[1]);
-    bpf_trace_printk("syscall__read_exit(): buf[2]=[%x]\n", buf[2]);
-    bpf_trace_printk("syscall__read_exit(): buf[3]=[%x]\n", buf[3]);
-    bpf_trace_printk("syscall__read_exit(): buf[4]=[%x]\n", buf[4]);
-#endif
-
     struct tls_hello_t *data = (struct tls_hello_t *)socket_table.lookup(&args->fd);
-    if(!data)
+    if (!data)
     {
         read_table.delete(&pid_tgid);
         return 0;
     }
 
     // is it TLS ?
-    if(1 == process_read(ctx, args->buf, count, data))
+    if (1 == process_read(ctx, args->buf, count, data))
     {
         submit_event(ctx, data);
 
@@ -239,7 +257,7 @@ int syscall__read_exit(struct pt_regs *ctx)
         socket_table.delete(&args->fd);
     }
 
-    bpf_trace_printk("syscall__read_exit(): fd=[%d], buf=[%d], count=[%d]\n", args->fd, args->buf, count);
+    LOG("syscall__read_exit(): fd=[%d], buf=[%d], count=[%d]\n", args->fd, args->buf, count);
 
     read_table.delete(&pid_tgid);
     return 0;
@@ -253,7 +271,7 @@ int syscall__accept_enter(struct pt_regs *ctx,
     if (!match_target_pid())
         return 0;
 
-    bpf_trace_printk("syscall__accept_enter(): sockfd=[%d]\n", sockfd);
+    LOG("syscall__accept_enter(): sockfd=[%d]\n", sockfd);
 
     u64 pid_tgid = bpf_get_current_pid_tgid();
     accept_table.update(&pid_tgid, &addr);
@@ -267,14 +285,14 @@ int syscall__accept_exit(struct pt_regs *ctx)
         return 0;
 
     int sockfd = (int)PT_REGS_RC(ctx);
-    bpf_trace_printk("syscall__accept_exit(): sockfd=[%d]\n", sockfd);
+    LOG("syscall__accept_exit(): sockfd=[%d]\n", sockfd);
 
     u64 pid_tgid = bpf_get_current_pid_tgid();
     struct sockaddr **addrp = accept_table.lookup(&pid_tgid);
     if (!addrp)
         return 0;
 
-    struct sockaddr* addr = (struct sockaddr*)*addrp;
+    struct sockaddr *addr = (struct sockaddr *)*addrp;
 
     struct tls_hello_t data = {};
     data.is_tls_header = 0;
@@ -297,8 +315,6 @@ int syscall__accept_exit(struct pt_regs *ctx)
     // cleanup accept_table
     accept_table.delete(&pid_tgid);
 
-    bpf_trace_printk("syscall__accept_exit(): fd=[%d]\n", sockfd);
-
     return 0;
 }
 
@@ -313,7 +329,7 @@ int syscall__close_enter(struct pt_regs *ctx,
     // delete socket <-> address entry
     socket_table.delete(&sockfd);
 
-    bpf_trace_printk("syscall__close_enter(): sockfd=[%d]\n", sockfd);
+    LOG("syscall__close_enter(): sockfd=[%d]\n", sockfd);
 
 EXIT:
     return 0;
@@ -322,12 +338,12 @@ EXIT:
 ///////////////////////////////////////////////////////////////////////////////////////////
 
 int syscall__connect_enter(struct pt_regs *ctx,
-                          int sockfd, struct sockaddr __user *addr, int addrlen)
+                           int sockfd, struct sockaddr __user *addr, int addrlen)
 {
     if (!match_target_pid())
         return 0;
 
-    bpf_trace_printk("syscall_connect_enter(): sockfd=[%d]\n", sockfd);
+    LOG("syscall_connect_enter(): sockfd=[%d]\n", sockfd);
 
     u64 pid_tgid = bpf_get_current_pid_tgid();
 
@@ -346,11 +362,10 @@ int syscall__connect_exit(struct pt_regs *ctx)
         return 0;
 
     long ret = (long)PT_REGS_RC(ctx);
-
-    bpf_trace_printk("syscall_connect_exit(): ret=[%ld]\n", ret);
+    LOG("syscall_connect_exit(): ret=[%ld]\n", ret);
 
     // exit if error happened while connecting
-    if(ret != 0)
+    if (ret != 0)
         return 0;
 
     u64 pid_tgid = bpf_get_current_pid_tgid();
@@ -358,7 +373,7 @@ int syscall__connect_exit(struct pt_regs *ctx)
     if (!cep)
         return 0;
 
-    struct sockaddr* addr = &cep->addr;
+    struct sockaddr *addr = &cep->addr;
 
     struct tls_hello_t data = {};
     data.is_tls_header = 0;
