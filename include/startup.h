@@ -4,7 +4,6 @@
 
 namespace tlsm
 {
-
     struct startup_t final
     {
         startup_t(int argc, char **argv)
@@ -28,7 +27,7 @@ namespace tlsm
             }
         }
 
-        const unsigned long pid() const
+        const pid_t pid() const
         {
             return _pid;
         }
@@ -41,11 +40,10 @@ namespace tlsm
                 exit(EXIT_FAILURE);
             }
 
-            std::cout << "attached to pid [" << _pid << "]\n";
+            std::cout << "Attached to pid [" << _pid << "]\n";
         }
 
     private:
         pid_t _pid{0};
     };
-
 }

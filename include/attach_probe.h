@@ -1,9 +1,8 @@
-#include <string>
+#include <iostream>
 #include "BPF.h"
 
 namespace tlsm
 {
-
     struct attach_probe_t final
     {
         attach_probe_t(ebpf::BPF &ebpf,
@@ -17,6 +16,10 @@ namespace tlsm
             {
                 std::cerr << rc.msg() << std::endl;
                 throw std::runtime_error("failed to attach probe [" + _probe_name + "]");
+            }
+            else
+            {
+                std::cout << "Attched to kprobe[" << _fnname << "] with [" << _probe_name << "]\n";
             }
         }
 
@@ -39,5 +42,4 @@ namespace tlsm
         std::string _fnname;
         std::string _probe_name;
     };
-
 }
