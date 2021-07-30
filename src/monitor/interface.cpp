@@ -1,4 +1,4 @@
-#include "interface_monitor.h"
+#include "monitor/interface.h"
 
 #include <linux/if_packet.h>
 #include <linux/if_ether.h>
@@ -7,13 +7,13 @@
 
 #include <boost/asio.hpp>
 
-namespace tlsm
+namespace tlsm::monitor
 {
-    interface_monitor_t::interface_monitor_t(boost::asio::io_context &ctx,
+    interface_t::interface_t(boost::asio::io_context &ctx,
                                              ebpf::BPF &bpf,
-                                             pid_t pid,
                                              const std::string &ifname)
-        : _bpf(bpf)
+        : _ctx(ctx)
+        , _bpf(bpf)
         , _socket(ctx, raw_protocol_t(PF_PACKET, SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC))
     {
         int prog_fd;
@@ -47,5 +47,10 @@ namespace tlsm
             std::cerr << "Error : setsockopt() failed [" << strerror(errno) << "]\n";
             exit(EXIT_FAILURE);
         }
+    }
+
+    void interface_t::start(std::function<bool()> cancelation)
+    {
+
     }
 }

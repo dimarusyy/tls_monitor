@@ -1,19 +1,14 @@
 #include "startup.h"
 #include "trace_pipe.h"
-#include "unix_socket_monitor.h"
-#include "interface_monitor.h"
+#include "if_utils.h"
+#include "monitor/unix_socket.h"
+#include "monitor/interface.h"
 
+// bpf program to compile
 #include "bpf/tls_monitor.h"
 
 #include <boost/asio/io_context.hpp>
-#include <boost/asio/post.hpp>
-#include <boost/asio/spawn.hpp>
 #include <boost/asio/signal_set.hpp>
-#include <boost/asio/deadline_timer.hpp>
-#include <boost/asio/high_resolution_timer.hpp>
-
-using namespace std::chrono_literals;
-#include <chrono>
 
 int main(int argc, char *argv[])
 {
@@ -30,36 +25,28 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
-    /// init unix monitor
-    tlsm::unix_socket_monitor_t unix_monitor{bpf, startup.pid()};
-
     // asio ctx
     boost::asio::io_context ctx;
 
     // hanlde Ctrl+C
     boost::asio::signal_set signals(ctx, SIGINT);
-    signals.async_wait([&](const boost::system::error_code &error, int signal_number)
-                       { stop = true; });
+    signals.async_wait([&](const boost::system::error_code &error,
+                           int signal_number)
+                       { boost::asio::post([&]()
+                                           { stop = true; }); });
 
-    // trigger timer loop
-    boost::asio::spawn(ctx, [&](auto yield)
-                       {
-                           boost::asio::high_resolution_timer timer(ctx);
-                           boost::system::error_code ec;
-                           while (!stop)
-                           {
-                               timer.expires_from_now(100ms, ec);
-                               if(ec)
-                               {
-                                   std::cout << "Error : [" << ec.message() << "]\n";
-                               }
-                               timer.async_wait(yield[ec]);
-                               if (!ec)
-                               {
-                                   unix_monitor.poll();
-                               }
-                           }
-                       });
+    /// init unix monitor
+    tlsm::monitor::unix_socket_t usm{ctx, bpf, startup.pid()};
+    usm.start([&]()
+              { return stop; });
+
+    std::vector<tlsm::monitor::interface_t> if_m;
+    for (auto name : tlsm::get_inet_if())
+    {
+        std::cout << "interface [" << name << "]\n";
+        if_m.emplace_back(ctx, bpf, name);
+    }
+
     ctx.run();
 
     return 0;

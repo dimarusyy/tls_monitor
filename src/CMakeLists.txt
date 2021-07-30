@@ -2,16 +2,18 @@ cmake_minimum_required(VERSION 3.14)
 
 set(TLS_MONITOR_HEADERS
   ${CMAKE_SOURCE_DIR}/include/attach_probe.h
-  ${CMAKE_SOURCE_DIR}/include/interface_monitor.h
+  ${CMAKE_SOURCE_DIR}/include/if_utils.h
   ${CMAKE_SOURCE_DIR}/include/startup.h
   ${CMAKE_SOURCE_DIR}/include/trace_pipe.h
-  ${CMAKE_SOURCE_DIR}/include/unix_socket_monitor.h
+  ${CMAKE_SOURCE_DIR}/include/monitor/interface.h
+  ${CMAKE_SOURCE_DIR}/include/monitor/unix_socket.h
   )
 
   set(TLS_MONITOR_SOURCES
-    ${CMAKE_SOURCE_DIR}/src/interface_monitor.cpp
+    ${CMAKE_SOURCE_DIR}/src/if_utils.cpp
     ${CMAKE_SOURCE_DIR}/src/trace_pipe.cpp
-    ${CMAKE_SOURCE_DIR}/src/unix_socket_monitor.cpp
+    ${CMAKE_SOURCE_DIR}/src/monitor/interface.cpp
+    ${CMAKE_SOURCE_DIR}/src/monitor/unix_socket.cpp
     ${CMAKE_SOURCE_DIR}/src/main.cpp
   )
 

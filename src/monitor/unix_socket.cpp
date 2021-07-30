@@ -1,4 +1,4 @@
-#include "unix_socket_monitor.h"
+#include "monitor/unix_socket.h"
 
 #include "bcc_version.h"
 
@@ -6,12 +6,13 @@
 #include "bpf/tls_monitor.h"
 
 #include <fmt/core.h>
+#include <boost/asio/spawn.hpp>
+#include <boost/asio/high_resolution_timer.hpp>
 
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <stdlib.h>
-
 #include <array>
 #include <iostream>
 
@@ -47,10 +48,11 @@ namespace
     }
 }
 
-namespace tlsm
+namespace tlsm::monitor
 {
-    unix_socket_monitor_t::unix_socket_monitor_t(ebpf::BPF &bpf, pid_t pid)
-        : _bpf(bpf)
+    unix_socket_t::unix_socket_t(boost::asio::io_context &ctx, ebpf::BPF &bpf, pid_t pid)
+        : _ctx(ctx)
+        , _bpf(bpf)
         , _read_enter(_bpf, _bpf.get_syscall_fnname("read"), "syscall__read_enter")
         , _read_exit(_bpf, _bpf.get_syscall_fnname("read"), "syscall__read_exit", BPF_PROBE_RETURN)
         , _close_enter(_bpf, _bpf.get_syscall_fnname("close"), "syscall__close_enter")
@@ -77,8 +79,26 @@ namespace tlsm
         }
     }
 
-    void unix_socket_monitor_t::poll(int timeout_ms)
+    void unix_socket_t::start(std::function<bool()> cancelation, int timeout_ms)
     {
-        _bpf.poll_perf_buffer("tls_events", timeout_ms);
+        // trigger timer loop
+        boost::asio::high_resolution_timer timer(_ctx);
+        boost::asio::spawn(_ctx, [&, cancelation = std::move(cancelation)](auto yield)
+                           {
+                               boost::system::error_code ec;
+                               while (!cancelation())
+                               {
+                                   timer.expires_from_now(std::chrono::milliseconds(timeout_ms), ec);
+                                   if (ec)
+                                   {
+                                       std::cout << "Error : [" << ec.message() << "]\n";
+                                   }
+                                   timer.async_wait(yield[ec]);
+                                   if (!ec)
+                                   {
+                                       _bpf.poll_perf_buffer("tls_events", 0);
+                                   }
+                               }
+                           });
     }
 }
