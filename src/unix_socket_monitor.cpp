@@ -1,5 +1,4 @@
 #include "unix_socket_monitor.h"
-#include "attach_probe.h"
 
 #include "bcc_version.h"
 
@@ -25,7 +24,6 @@ namespace
 
     void on_tls_event_handler(void *cb_cookie, void *data, int data_size)
     {
-
         auto event = static_cast<accept_event_t *>(data);
         struct sockaddr *peer = (struct sockaddr *)&event->addr;
         if (peer->sa_family == AF_INET)
@@ -51,15 +49,16 @@ namespace
 
 namespace tlsm
 {
-    unix_socket_monitor_t::unix_socket_monitor_t(pid_t pid)
+    unix_socket_monitor_t::unix_socket_monitor_t(ebpf::BPF &bpf, pid_t pid)
+        : _bpf(bpf)
+        , _read_enter(_bpf, _bpf.get_syscall_fnname("read"), "syscall__read_enter")
+        , _read_exit(_bpf, _bpf.get_syscall_fnname("read"), "syscall__read_exit", BPF_PROBE_RETURN)
+        , _close_enter(_bpf, _bpf.get_syscall_fnname("close"), "syscall__close_enter")
+        , _accept_enter(_bpf, _bpf.get_syscall_fnname("accept"), "syscall__accept_enter")
+        , _accept_exit(_bpf, _bpf.get_syscall_fnname("accept"), "syscall__accept_exit", BPF_PROBE_RETURN)
+        , _connect_enter(_bpf, _bpf.get_syscall_fnname("connect"), "syscall__connect_enter")
+        , _connect_exit(_bpf, _bpf.get_syscall_fnname("connect"), "syscall__connect_exit", BPF_PROBE_RETURN)
     {
-        auto init_res = _bpf.init(BPF_PROGRAM);
-        if (init_res.code() != 0)
-        {
-            std::cerr << init_res.msg() << std::endl;
-            exit(EXIT_FAILURE);
-        }
-
         // set filterting pid
         uint32_t key{0};
         auto pid_table = _bpf.get_array_table<uint32_t>("target_pid");
@@ -70,40 +69,16 @@ namespace tlsm
             exit(EXIT_FAILURE);
         }
 
-        // read
-        auto syscall_read_name = _bpf.get_syscall_fnname("read");
-        attach_probe_t read_enter(_bpf, syscall_read_name, "syscall__read_enter");
-        attach_probe_t read_exit(_bpf, syscall_read_name, "syscall__read_exit", BPF_PROBE_RETURN);
-
-        //close
-        auto syscall_close_name = _bpf.get_syscall_fnname("close");
-        attach_probe_t close_enter(_bpf, syscall_close_name, "syscall__close_enter");
-
-        //accept
-        auto syscall_accept_name = _bpf.get_syscall_fnname("accept");
-        attach_probe_t accept_enter(_bpf, syscall_accept_name, "syscall__accept_enter");
-        attach_probe_t accept_exit(_bpf, syscall_accept_name, "syscall__accept_exit", BPF_PROBE_RETURN);
-
-        //connect
-        auto syscall_connect_name = _bpf.get_syscall_fnname("connect");
-        attach_probe_t connect_enter(_bpf, syscall_connect_name, "syscall__connect_enter");
-        attach_probe_t connect_exit(_bpf, syscall_connect_name, "syscall__connect_exit", BPF_PROBE_RETURN);
-
         rc = _bpf.open_perf_buffer("tls_events", &on_tls_event_handler);
         if (rc.code() != 0)
         {
             std::cerr << rc.msg() << "\n";
             exit(EXIT_FAILURE);
         }
-
-        while (!_stop.load(std::memory_order_acquire))
-        {
-            _bpf.poll_perf_buffer("tls_events", 100);
-        }
     }
 
-    void unix_socket_monitor_t::stop()
+    void unix_socket_monitor_t::poll()
     {
-        _stop.store(true, std::memory_order_release);
+        _bpf.poll_perf_buffer("tls_events");
     }
 }

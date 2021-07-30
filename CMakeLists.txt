@@ -1,8 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
 
-#enable verbose makefiles
-set(CMAKE_VERBOSE_MAKEFILE ON CACHE BOOL "ON")
-
 include(cmake/dependencies.cmake)
 
 set(TLS_MONITOR_BINARY_NAME "tlsmon")
@@ -12,9 +9,10 @@ project(tls-monitor
 		LANGUAGES CXX
 		VERSION ${TLS_MONITOR_BINARY_VERSION})
 
-include(cmake/validate.cmake)
+set(CMAKE_VERBOSE_MAKEFILE ON CACHE BOOL "ON")
 
 include(CheckCXXCompilerFlag)
+include(cmake/validate.cmake)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
