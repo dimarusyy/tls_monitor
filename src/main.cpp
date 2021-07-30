@@ -5,22 +5,24 @@
 
 #include "bpf/tls_monitor.h"
 
-#include <future>
-#include <atomic>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/post.hpp>
+#include <boost/asio/spawn.hpp>
+#include <boost/asio/signal_set.hpp>
+#include <boost/asio/deadline_timer.hpp>
+#include <boost/asio/high_resolution_timer.hpp>
 
-std::atomic_bool stop{false};
-
-void on_signal(int signal)
-{
-    stop = true;
-}
+using namespace std::chrono_literals;
+#include <chrono>
 
 int main(int argc, char *argv[])
 {
+    ebpf::BPF bpf;
+    bool stop{false};
+
     tlsm::startup_t startup(argc, argv);
     startup.check_pid();
 
-    ebpf::BPF bpf;
     auto init_res = bpf.init(BPF_PROGRAM);
     if (init_res.code() != 0)
     {
@@ -28,14 +30,37 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
+    /// init unix monitor
     tlsm::unix_socket_monitor_t unix_monitor{bpf, startup.pid()};
-    auto poll_unix_monitor = std::async(std::launch::async, [&]()
-                                        {
-                                            while (!stop)
-                                                unix_monitor.poll();
-                                        });
 
-    signal(SIGINT, on_signal);
+    // asio ctx
+    boost::asio::io_context ctx;
+
+    // hanlde Ctrl+C
+    boost::asio::signal_set signals(ctx, SIGINT);
+    signals.async_wait([&](const boost::system::error_code &error, int signal_number)
+                       { stop = true; });
+
+    // trigger timer loop
+    boost::asio::spawn(ctx, [&](auto yield)
+                       {
+                           boost::asio::high_resolution_timer timer(ctx);
+                           boost::system::error_code ec;
+                           while (!stop)
+                           {
+                               timer.expires_from_now(100ms, ec);
+                               if(ec)
+                               {
+                                   std::cout << "Error : [" << ec.message() << "]\n";
+                               }
+                               timer.async_wait(yield[ec]);
+                               if (!ec)
+                               {
+                                   unix_monitor.poll();
+                               }
+                           }
+                       });
+    ctx.run();
 
     return 0;
 }

@@ -77,8 +77,8 @@ namespace tlsm
         }
     }
 
-    void unix_socket_monitor_t::poll()
+    void unix_socket_monitor_t::poll(int timeout_ms)
     {
-        _bpf.poll_perf_buffer("tls_events");
+        _bpf.poll_perf_buffer("tls_events", timeout_ms);
     }
 }

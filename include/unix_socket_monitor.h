@@ -9,7 +9,7 @@ namespace tlsm
     {
         explicit unix_socket_monitor_t(ebpf::BPF& bpf, pid_t pid);
 
-        void poll();
+        void poll(int timeout_ms = 0);
 
     private:
         ebpf::BPF& _bpf;
