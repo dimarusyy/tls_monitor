@@ -82,10 +82,10 @@ namespace tlsm::monitor
     void unix_socket_t::start(std::function<bool()> cancelation, int timeout_ms)
     {
         // trigger timer loop
-        boost::asio::high_resolution_timer timer(_ctx);
-        boost::asio::spawn(_ctx, [&, cancelation = std::move(cancelation)](auto yield)
+        boost::asio::spawn(_ctx, [&, timeout_ms, cancelation = std::move(cancelation)](auto yield)
                            {
                                boost::system::error_code ec;
+                               boost::asio::high_resolution_timer timer(_ctx);
                                while (!cancelation())
                                {
                                    timer.expires_from_now(std::chrono::milliseconds(timeout_ms), ec);
